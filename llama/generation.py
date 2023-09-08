@@ -174,7 +174,7 @@ class Llama:
                 t = t[: t.index(self.tokenizer.eos_id)]
             except ValueError:
                 pass
-            decoded.append(self.tokenizer.decode(t))
+            decoded.append(t)  # for compatibility we want generate to return indices and not words
         return decoded
 
     def text_completion(
