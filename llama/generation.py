@@ -143,7 +143,7 @@ class Llama:
         input_text_mask = tokens != pad_id
 
         prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz, device="cpu")
         input_text_mask = tokens != pad_id
         if min_prompt_len == total_len:
             logits = self.model.forward(tokens, prev_pos)
@@ -323,7 +323,6 @@ class Llama:
             temperature=temperature,
             top_p=top_p,
         )
-
         return [
             {
                 "generation": {
