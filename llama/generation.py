@@ -1,26 +1,58 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the GNU General Public License version 3.
 
-from typing import List
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from typing import List, Literal, Optional, Tuple, TypedDict
 
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
-from pathlib import Path
-import time
-import json
 
+from llama.model import ModelArgs, Transformer
 from llama.tokenizer import Tokenizer
-from llama.model import Transformer, ModelArgs
+
+Role = Literal["system", "user", "assistant"]
 
 
-class LLaMA:
+class Message(TypedDict):
+    role: Role
+    content: str
+
+
+class CompletionPrediction(TypedDict, total=False):
+    generation: str
+    tokens: List[str]  # not required
+    logprobs: List[float]  # not required
+
+
+class ChatPrediction(TypedDict, total=False):
+    generation: Message
+    tokens: List[str]  # not required
+    logprobs: List[float]  # not required
+
+
+Dialog = List[Message]
+
+B_INST, E_INST = "[INST]", "[/INST]"
+B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
+
+SPECIAL_TAGS = [B_INST, E_INST, "<<SYS>>", "<</SYS>>"]
+UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
+
+
+class Llama:
     @staticmethod
-    def load(
-            ckpt_dir: str,
-            tokenizer_path: str,
-            max_seq_len: int,
-            max_batch_size: int,
-        ) -> "LLaMA":
+    def build(
+        ckpt_dir: str,
+        tokenizer_path: str,
+        max_seq_len: int,
+        max_batch_size: int,
+        model_parallel_size: Optional[int] = None,
+    ) -> "Llama":
         print("Creating model...")
         start_time = time.time()
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
@@ -29,12 +61,12 @@ class LLaMA:
             params = json.loads(f.read())
 
         model_args: ModelArgs = ModelArgs(
-            max_seq_len=max_seq_len, max_batch_size=max_batch_size, **params
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
+            **params,
         )
-
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model_args.vocab_size = tokenizer.n_words
-
         model = Transformer(model_args)
 
         # Original copyright by tloen
@@ -77,7 +109,7 @@ class LLaMA:
 
         model.to("cpu")
 
-        generator = LLaMA(model, tokenizer)
+        generator = Llama(model, tokenizer)
         print(f"Loaded model in {time.time() - start_time:.2f} seconds")
         return generator
 
@@ -85,28 +117,29 @@ class LLaMA:
         self.model = model
         self.tokenizer = tokenizer
 
+    @torch.inference_mode()
     def generate(
-            self,
-            prompts: List[str],
-            max_gen_len: int,
-            temperature: float = 0.8,
-            top_p: float = 0.95,
+        self,
+        prompt_tokens: List[List[int]],
+        max_gen_len: int,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
     ) -> List[str]:
-        bsz = len(prompts)
         params = self.model.params
+        bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
-        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
 
         min_prompt_size = min([len(t) for t in prompt_tokens])
         max_prompt_size = max([len(t) for t in prompt_tokens])
-
+        assert max_prompt_len <= params.max_seq_len
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_size)
 
-        tokens = torch.full((bsz, total_len), self.tokenizer.pad_id).cpu().long()
+        pad_id = self.tokenizer.pad_id
+        tokens = torch.full((bsz, total_len), pad_id).cpu().long()
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t).long()
-        input_text_mask = tokens != self.tokenizer.pad_id
+        input_text_mask = tokens != pad_id
 
         start_pos = min_prompt_size
         prev_pos = 0
