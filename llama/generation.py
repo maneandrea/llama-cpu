@@ -124,7 +124,7 @@ class Llama:
         max_gen_len: int,
         temperature: float = 0.8,
         top_p: float = 0.95,
-    ) -> List[str]:
+    ) -> List[List[int]]:
         params = self.model.params
         bsz = len(prompt_tokens)
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
